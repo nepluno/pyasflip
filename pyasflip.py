@@ -193,9 +193,8 @@ def ProjectDruckerPrager(S: ti.template(), Jp: ti.template()):
   JSe = S[0, 0] * S[1, 1]
   for d in ti.static(range(2)):
     S[d, d] = ti.max(1e-6, ti.abs(S[d, d] * Jp))
-  trace_S = S[0, 0] + S[1, 1]
 
-  if trace_S >= 2.0:  # Project to tip
+  if S[0, 0] * S[1, 1] >= 1.0:  # Project to tip
     S[0, 0] = 1.0
     S[1, 1] = 1.0
     Jp *= ti.pow(max(1e-6, JSe), volume_recovery_rate)
@@ -486,6 +485,7 @@ while True:
   if gui.get_event(ti.GUI.PRESS):
     if gui.event.key == "r":
       Reset()
+      frame = 0
     elif gui.event.key in [ti.GUI.ESCAPE, ti.GUI.EXIT]:
       break
     elif gui.event.key == " ":
