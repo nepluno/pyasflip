@@ -235,6 +235,44 @@ def NeoHookeanElasticity(U, sig):
   stress[1, 1] += J_prime
   return stress
 
+# Check if a position is inside the capsule and compute their
+# relative velocity and normal
+@ti.func
+def CheckSdfCapsule(pos, vel):
+  cap_rot = capsule_rotation[None][0]
+  capsule_rotmat = ti.Matrix(
+    [
+      [ti.cos(cap_rot), -ti.sin(cap_rot)],
+      [ti.sin(cap_rot), ti.cos(cap_rot)],
+    ]
+  )
+  local_pos = WorldSpaceToMaterialSpace(
+    pos, capsule_translation[None], capsule_rotmat
+  )
+  phi = SdfCapsule(local_pos, capsule_radius, capsule_half_length)
+  inside = False
+  dotnv = 0.
+  diff_vel = ti.Vector.zero(float, 2)
+  n = ti.Vector.zero(float, 2)
+  if phi < 0.0:
+    n = capsule_rotmat @ SdfNormalCapsule(
+      local_pos, capsule_radius, capsule_half_length
+    )
+    solid_vel = ti.Vector(
+      [
+        capsule_trans_vel[None][0]
+        - capsule_angular_vel
+        * (pos[1] - capsule_translation[None][1]),
+        capsule_trans_vel[None][1]
+        + capsule_angular_vel
+        * (pos[0] - capsule_translation[None][0]),
+      ]
+    )
+    diff_vel = solid_vel - vel
+    dotnv = n.dot(diff_vel)
+    if dotnv > 0.0:
+      inside = True
+  return inside, dotnv, diff_vel, n
 
 # Sub-stepping the simulation
 @ti.kernel
@@ -253,90 +291,73 @@ def Substep():
   rc0 = (param_apic_str + param_apic_rot) * 0.5
   rc1 = (param_apic_str - param_apic_rot) * 0.5
   for p in x:
-    base = (x[p] * inv_dx - 0.5).cast(int)
-    fx = x[p] * inv_dx - base.cast(float)
+    xp = x[p]
+    vp = v[p]
+    base = (xp * inv_dx - 0.5).cast(int)
+    fx = xp * inv_dx - base.cast(float)
     # Quadratic kernels  [http://mpm.graphics   Eqn. 123, with x=fx, fx-1,fx-2]
     w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
     # deformation gradient update
-    F[p] = (ti.Matrix.identity(float, 2) + dt * C[p]) @ F[p]
-    U, sig, V = ti.svd(F[p])
+    Fp = F[p]
+    Cp = C[p]
+    Fp = (ti.Matrix.identity(float, 2) + dt * Cp) @ Fp
+    U, sig, V = ti.svd(Fp)
     # Plasticity flow
     ProjectDruckerPrager(sig, Jp[p])
     # Reconstruct elastic deformation gradient after plasticity
     F[p] = U @ sig @ V.transpose()
     stress = NeoHookeanElasticity(U, sig)
     stress = (-dt * p_vol * 4 * inv_dx * inv_dx) * stress
-    affine_without_stress = p_mass * (C[p] * rc0 + C[p].transpose() * rc1)
+    affine_without_stress = p_mass * (Cp * rc0 + Cp.transpose() * rc1)
     affine = stress + affine_without_stress
     for i, j in ti.static(ti.ndrange(3, 3)):  # Loop over 3x3 grid node neighborhood
       offset = ti.Vector([i, j])
       dpos = (offset.cast(float) - fx) * dx
       weight = w[i][0] * w[j][1]
-      grid_v[base + offset] += weight * (p_mass * v[p] + affine @ dpos)
+      grid_v[base + offset] += weight * (p_mass * vp + affine @ dpos)
       grid_v0[base + offset] += weight * (
-        p_mass * v[p] + affine_without_stress @ dpos
+        p_mass * vp + affine_without_stress @ dpos
       )
       grid_m[base + offset] += weight * p_mass
   # External force and collision
   for i, j in grid_m:
-    if grid_m[i, j] > 0:  # No need for epsilon here
-      grid_v[i, j] = (1 / grid_m[i, j]) * grid_v[i, j]  # Momentum to velocity
-      grid_v[i, j] += dt * gravity[None]  # gravity
-      grid_v0[i, j] = (1 / grid_m[i, j]) * grid_v0[i, j]
+    nmass = grid_m[i, j]
+    if nmass > 0:  # No need for epsilon here
+      nvel = grid_v[i, j]
+      nvel *= 1. / nmass  # Momentum to velocity
+      nvel += dt * gravity[None]  # gravity
+      grid_v0[i, j] *= 1. / nmass
 
       # Boundary conditions at border
-      if i < 3 and grid_v[i, j][0] < 0:
-        grid_v[i, j][0] = 0
-        grid_v[i, j][1] *= 1.0 - side_friction
-      if i > n_grid - 3 and grid_v[i, j][0] > 0:
-        grid_v[i, j][0] = 0
-        grid_v[i, j][1] *= 1.0 - side_friction
-      if j < 3 and grid_v[i, j][1] < 0:
-        grid_v[i, j][0] *= 1.0 - ground_friction
-        grid_v[i, j][1] = 0
-      if j > n_grid - 3 and grid_v[i, j][1] > 0:
-        grid_v[i, j][0] *= 1.0 - side_friction
-        grid_v[i, j][1] = 0
+      if i < 3 and nvel[0] < 0:
+        nvel[0] = 0
+        nvel[1] *= 1.0 - side_friction
+      if i > n_grid - 3 and nvel[0] > 0:
+        nvel[0] = 0
+        nvel[1] *= 1.0 - side_friction
+      if j < 3 and nvel[1] < 0:
+        nvel[0] *= 1.0 - ground_friction
+        nvel[1] = 0
+      if j > n_grid - 3 and nvel[1] > 0:
+        nvel[0] *= 1.0 - side_friction
+        nvel[1] = 0
       # Boundary condition at capsule
       npos = ti.Vector([i, j]).cast(float) * dx
-      cap_rot = capsule_rotation[None][0]
-      capsule_rotmat = ti.Matrix(
-        [
-          [ti.cos(cap_rot), -ti.sin(cap_rot)],
-          [ti.sin(cap_rot), ti.cos(cap_rot)],
-        ]
-      )
-      local_npos = WorldSpaceToMaterialSpace(
-        npos, capsule_translation[None], capsule_rotmat
-      )
-      phi = SdfCapsule(local_npos, capsule_radius, capsule_half_length)
-      if phi < 0.0:
-        n = capsule_rotmat @ SdfNormalCapsule(
-          local_npos, capsule_radius, capsule_half_length
-        )
-        solid_vel = ti.Vector(
-          [
-            capsule_trans_vel[None][0]
-            - capsule_angular_vel
-            * (npos[1] - capsule_translation[None][1]),
-            capsule_trans_vel[None][1]
-            + capsule_angular_vel
-            * (npos[0] - capsule_translation[None][0]),
-          ]
-        )
-        diff_vel = solid_vel - grid_v[i, j]
-        dotnv = n.dot(diff_vel)
-        if dotnv > 0.0:
-          dotnv_frac = dotnv * (1.0 - capsule_friction)
-          grid_v[i, j] += diff_vel * capsule_friction + n * dotnv_frac
+      inside, dotnv, diff_vel, n = CheckSdfCapsule(npos, nvel)
+      if inside:
+        dotnv_frac = dotnv * (1.0 - capsule_friction)
+        nvel += diff_vel * capsule_friction + n * dotnv_frac
+      grid_v[i, j] = nvel
+
   # grid to particle (G2P)
   param_flip_vel_adj = adv_params[None][0]
   param_flip_pos_adj_min = adv_params[None][1]
   param_flip_pos_adj_max = adv_params[None][2]
   param_part_col = adv_params[None][5] > 0.0
   for p in x:
-    base = (x[p] * inv_dx - 0.5).cast(int)
-    fx = x[p] * inv_dx - base.cast(float)
+    xp = x[p]
+    base = (xp * inv_dx - 0.5).cast(int)
+    fx = xp * inv_dx - base.cast(float)
     w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
     new_v = ti.Vector.zero(float, 2)
     new_C = ti.Matrix.zero(float, 2, 2)
@@ -348,38 +369,13 @@ def Substep():
       new_C += 4 * inv_dx * weight * g_v.outer_product(dpos)
     # Check if velocity adjustment is used (for any xFLIP)
     if param_flip_vel_adj > 0.0:
+      vp = v[p]
       flip_pos_adj = param_flip_pos_adj_max
       # Check if our positional correction is adopted
       if flip_pos_adj > 0.0 and param_part_col:
         # Check if the particle collides with the capsule
-        cap_rot = capsule_rotation[None][0]
-        capsule_rotmat = ti.Matrix(
-          [
-            [ti.cos(cap_rot), -ti.sin(cap_rot)],
-            [ti.sin(cap_rot), ti.cos(cap_rot)],
-          ]
-        )
-        local_ppos = WorldSpaceToMaterialSpace(
-          x[p], capsule_translation[None], capsule_rotmat
-        )
-        phi = SdfCapsule(local_ppos, capsule_radius, capsule_half_length)
-        if phi < 0.0:
-          n = capsule_rotmat @ SdfNormalCapsule(
-            local_ppos, capsule_radius, capsule_half_length
-          )
-          solid_vel = ti.Vector(
-            [
-              capsule_trans_vel[None][0]
-              - capsule_angular_vel
-              * (x[p][1] - capsule_translation[None][1]),
-              capsule_trans_vel[None][1]
-              + capsule_angular_vel
-              * (x[p][0] - capsule_translation[None][0]),
-            ]
-          )
-          diff_vel = solid_vel - v[p]
-          dotnv = n.dot(diff_vel)
-          if dotnv > 0.0:
+        inside, _0, _1, _2 = CheckSdfCapsule(xp, vp)
+        if inside:
             flip_pos_adj = 0.0
       # if not collided, check if the particle is separating
       if param_flip_pos_adj_min < flip_pos_adj:
@@ -394,13 +390,13 @@ def Substep():
         weight = w[i][0] * w[j][1]
         old_v += weight * g_v0
       # apply generalized FLIP advection
-      diff_vel = v[p] - old_v
+      diff_vel = vp - old_v
       v[p] = new_v + param_flip_vel_adj * diff_vel
-      x[p] += (new_v + flip_pos_adj * param_flip_vel_adj * diff_vel) * dt
+      x[p] = xp + (new_v + flip_pos_adj * param_flip_vel_adj * diff_vel) * dt
     else:
       # apply PIC advection
       v[p] = new_v
-      x[p] += new_v * dt
+      x[p] = xp + new_v * dt
     C[p] = new_C
 
 
