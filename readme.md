@@ -1,20 +1,21 @@
 ASFLIP Demo
 ================
 ![Screenshot](http://yunfei.work/asflip/figs/example.png)
-This is a python implementation of the ASFLIP advection method (http://yunfei.work/asflip/). We would like to hear from you if you appreciate this work.
+This is a Python implementation of the ASFLIP advection method (http://yunfei.work/asflip/). We would like to hear from you if you appreciate this work.
 
 Dependencies
 --------------------
-This demo depends on the Taichi library (https://taichi.graphics/). You may follow its tutorial for installation, or simply type `pip install taichi` under a Python 3 environment.
+This demo depends on [Taichi](https://github.com/taichi-dev/taichi). You may follow its [documentation](https://docs.taichi.graphics/) for installation, or simply type `pip install taichi` under a Python 3 environment.
 
 Run the Demo
 --------------------
-To run the demo, simply type `python pyasflip.py` under a Python 3 environment with Taichi library installed.
+To run the demo, simply type `python pyasflip.py` under a Python 3 environment with Taichi installed.
 
 Press R to reset; `Space` to pause/start the simulation; `Left`/`Right` to switch between advection schemes.
 
 BibTex Citation
 ----------------------
+```
 @article{fei2021asflip,  
  author = {Fei, Yun (Raymond) and Guo, Qi and Wu, Rundong and Huang, Li and Gao, Ming},  
  title = {Revisiting Integration in the Material Point Method: A Scheme for Easier Separation and Less Dissipation},  
@@ -33,3 +34,4 @@ BibTex Citation
  publisher = {ACM},  
  address = {New York, NY, USA}  
 }
+```
