@@ -86,6 +86,9 @@ def SetupAdvection(advection_type):
 # Set current scheme
 current_advection = SetupAdvection(AdvectionType.ASFLIP)
 
+# Scheme label position
+scheme_label_offset_x = -0.07
+
 # Run Taichi on GPU
 ti.init(arch=ti.gpu)
 window_res = 512
@@ -165,7 +168,7 @@ def WorldSpaceToMaterialSpace(x, translation, rotation):
 # Function computing the signed distance field of a 2D capsule
 @ti.func
 def SdfCapsule(X, radius, half_length):
-  alpha = ti.min(ti.max((X[0] / half_length + 1.0) * 0.5, 0.0), 1.0)
+  alpha = min(max((X[0] / half_length + 1.0) * 0.5, 0.0), 1.0)
   tmp = ti.Vector([X[0], X[1]])
   tmp[0] += (1.0 - 2.0 * alpha) * half_length
   return tmp.norm() - radius
@@ -175,10 +178,10 @@ def SdfCapsule(X, radius, half_length):
 @ti.func
 def SdfNormalCapsule(X, radius, half_length):
   unclamped_alpha = (X[0] / half_length + 1.0) * 0.5
-  alpha = ti.min(ti.max(unclamped_alpha, 0.0), 1.0)
+  alpha = min(max(unclamped_alpha, 0.0), 1.0)
   normal = ti.Vector([X[0], X[1]])
   normal[0] += (1.0 - 2.0 * alpha) * half_length
-  ltmp = ti.max(1e-12, normal.norm())
+  ltmp = max(1e-12, normal.norm())
   normal[0] /= ltmp
   normal[1] /= ltmp
   if unclamped_alpha >= 0.0 and unclamped_alpha <= 1.0:
@@ -192,7 +195,7 @@ def SdfNormalCapsule(X, radius, half_length):
 def ProjectDruckerPrager(S: ti.template(), Jp: ti.template()):
   JSe = S[0, 0] * S[1, 1]
   for d in ti.static(range(2)):
-    S[d, d] = ti.max(1e-6, ti.abs(S[d, d] * Jp))
+    S[d, d] = max(1e-6, abs(S[d, d] * Jp))
 
   if S[0, 0] * S[1, 1] >= 1.0:  # Project to tip
     S[0, 0] = 1.0
@@ -418,7 +421,7 @@ def Reset():
   capsule_rotation[None] = [0.0]
 
 
-print("[Hint] Press R to reset. <Space> to pause. <Left>/<Right> to switch schemes")
+print("[Hint] Press R to reset. <Space> to pause. <Left>/<Right> to switch schemes.")
 gui = ti.GUI("ASFLIP Demo", res=window_res, background_color=0xFFFFFF)
 Reset()
 adv_params[None] = [
@@ -457,6 +460,7 @@ def DrawCapsule(gui, radius, half_length, translation, rotation, color):
     color=color,
   )
   gui.circles(end_pos, color=color, radius=radius * window_res)
+  gui.text(current_advection.name, pos=[ct[0] + scheme_label_offset_x, ct[1]], font_size=30)
 
 
 # Print scheme parameters
