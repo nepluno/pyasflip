@@ -1,4 +1,17 @@
 # Copyright (c) 2021, Tencent Inc. All rights reserved.
+#
+# References: 
+# [Yue et al. 2018] "Hybrid grains: Adaptive coupling of discrete and 
+#                    continuum simulations of granular media." ACM 
+#                    Transactions on Graphics (TOG) 37.6 (2018): 1-19.
+# [Gao et al. 2018] "Animating fluid sediment mixture in particle-laden 
+#                    flows." ACM Transactions on Graphics (TOG) 37.4
+#                    (2018): 1-11.
+# [Simo 1988]       "A framework for finite strain elastoplasticity based 
+#                    on maximum plastic dissipation and the multiplicative 
+#                    decomposition: Part I. Continuum formulation." 
+#                    Computer methods in applied mechanics and engineering 
+#                    66.2 (1988): 199-219.
 
 import taichi as ti
 import numpy as np
@@ -123,7 +136,6 @@ kappa_0, mu_0 = E / (3 * (1 - nu * 2)), E / (2 * (1 + nu))
 friction_angle = 40.0
 sin_phi = ti.sin(friction_angle / 180.0 * 3.141592653)
 material_friction = 1.633 * sin_phi / (3.0 - sin_phi)
-volume_recovery_rate = 0.5
 
 # Collision object, here we use a simple rotating capsule for demo
 init_capsule_center_x = 0.5
@@ -146,7 +158,7 @@ x = ti.Vector.field(2, dtype=float, shape=n_particles)  # position
 v = ti.Vector.field(2, dtype=float, shape=n_particles)  # velocity
 C = ti.Matrix.field(2, 2, dtype=float, shape=n_particles)  # affine velocity field
 F = ti.Matrix.field(2, 2, dtype=float, shape=n_particles)  # deformation gradient
-Jp = ti.field(dtype=float, shape=n_particles)  # plastic deformation
+Sp = ti.field(dtype=float, shape=n_particles)  # plastic deformation
 grid_v = ti.Vector.field(
   2, dtype=float, shape=(n_grid, n_grid)
 )  # grid node momentum/velocity
@@ -192,17 +204,20 @@ def SdfNormalCapsule(X, radius, half_length):
 # Project the singular values of deformation gradient with Drucker-Prager model
 # Refer to [Yue et al. 2018] for details.
 @ti.func
-def ProjectDruckerPrager(S: ti.template(), Jp: ti.template()):
+def ProjectDruckerPrager(S: ti.template(), Sp: ti.template()):
   JSe = S[0, 0] * S[1, 1]
   for d in ti.static(range(2)):
-    S[d, d] = max(1e-6, abs(S[d, d] * Jp))
+    S[d, d] = max(1e-6, abs(S[d, d] * Sp))
 
   if S[0, 0] * S[1, 1] >= 1.0:  # Project to tip
     S[0, 0] = 1.0
     S[1, 1] = 1.0
-    Jp *= ti.pow(max(1e-6, JSe), volume_recovery_rate)
+
+    # Record the geometric mean of per-dimension expansions for later volume
+    # recovery during compression, refer to [Gao et al. 2018]
+    Sp *= ti.sqrt(max(1e-6, JSe))
   else:  # Check if the stress is inside the feasible region
-    Jp = 1.0
+    Sp = 1.0
     Je = max(1e-6, S[0, 0] * S[1, 1])
     sqrS_0 = S[0, 0] * S[0, 0]
     sqrS_1 = S[1, 1] * S[1, 1]
@@ -223,7 +238,7 @@ def ProjectDruckerPrager(S: ti.template(), Jp: ti.template()):
       S[1, 1] = ti.sqrt(abs(lambda_1 + lambda_2 * dev_b1))
 
 
-# Compute stress with Simo's [1982] neo-Hookean elasticity
+# Compute stress with Simo's [1988] neo-Hookean elasticity
 @ti.func
 def NeoHookeanElasticity(U, sig):
   J = sig[0, 0] * sig[1, 1]
@@ -306,7 +321,7 @@ def Substep():
     Fp = (ti.Matrix.identity(float, 2) + dt * Cp) @ Fp
     U, sig, V = ti.svd(Fp)
     # Plasticity flow
-    ProjectDruckerPrager(sig, Jp[p])
+    ProjectDruckerPrager(sig, Sp[p])
     # Reconstruct elastic deformation gradient after plasticity
     F[p] = U @ sig @ V.transpose()
     stress = NeoHookeanElasticity(U, sig)
@@ -413,7 +428,7 @@ def Reset():
     ]
     v[i] = [0, 0]
     F[i] = ti.Matrix([[1, 0], [0, 1]])
-    Jp[i] = 1
+    Sp[i] = 1
     C[i] = ti.Matrix.zero(float, 2, 2)
   gravity[None] = [0, -9.81]
   capsule_translation[None] = [init_capsule_center_x, init_capsule_center_y]
