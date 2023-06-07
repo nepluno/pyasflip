@@ -52,7 +52,7 @@ def SetupAdvection(advection_type):
     apic_affine_rotation = 0.0
     particle_collision = 0.0
   elif advection_type is AdvectionType.FLIP:
-    flip_velocity_adjustment = 0.99
+    flip_velocity_adjustment = 0.97
     flip_position_adjustment_min = 0.0
     flip_position_adjustment_max = 0.0
     apic_affine_stretching = 0.0
@@ -66,7 +66,7 @@ def SetupAdvection(advection_type):
     apic_affine_rotation = 0.0
     particle_collision = 0.0
   elif advection_type is AdvectionType.SFLIP:
-    flip_velocity_adjustment = 0.99
+    flip_velocity_adjustment = 0.97
     flip_position_adjustment_min = 0.0
     flip_position_adjustment_max = 1.0
     apic_affine_stretching = 0.0
@@ -80,14 +80,14 @@ def SetupAdvection(advection_type):
     apic_affine_rotation = 1.0
     particle_collision = 0.0
   elif advection_type is AdvectionType.AFLIP:
-    flip_velocity_adjustment = 0.99
+    flip_velocity_adjustment = 0.97
     flip_position_adjustment_min = 0.0
     flip_position_adjustment_max = 0.0
     apic_affine_stretching = 1.0
     apic_affine_rotation = 1.0
     particle_collision = 0.0
   elif advection_type is AdvectionType.ASFLIP:
-    flip_velocity_adjustment = 0.99
+    flip_velocity_adjustment = 0.97
     flip_position_adjustment_min = 0.0
     flip_position_adjustment_max = 1.0
     apic_affine_stretching = 1.0
@@ -136,6 +136,8 @@ kappa_0, mu_0 = E / (3 * (1 - nu * 2)), E / (2 * (1 + nu))
 friction_angle = 40.0
 sin_phi = ti.sin(friction_angle / 180.0 * 3.141592653)
 material_friction = 1.633 * sin_phi / (3.0 - sin_phi)
+volume_recovery_rate = 0.3   # rate for volume recovery, tuned for stability
+volume_recording_limit = 3.0 # limit of volume recording (log space), tuned for stability
 
 # Collision object, here we use a simple rotating capsule for demo
 init_capsule_center_x = 0.5
@@ -158,7 +160,7 @@ x = ti.Vector.field(2, dtype=float, shape=n_particles)  # position
 v = ti.Vector.field(2, dtype=float, shape=n_particles)  # velocity
 C = ti.Matrix.field(2, 2, dtype=float, shape=n_particles)  # affine velocity field
 F = ti.Matrix.field(2, 2, dtype=float, shape=n_particles)  # deformation gradient
-Sp = ti.field(dtype=float, shape=n_particles)  # plastic deformation
+logSp = ti.field(dtype=float, shape=n_particles)  # plastic deformation
 grid_v = ti.Vector.field(
   2, dtype=float, shape=(n_grid, n_grid)
 )  # grid node momentum/velocity
@@ -204,20 +206,24 @@ def SdfNormalCapsule(X, radius, half_length):
 # Project the singular values of deformation gradient with Drucker-Prager model
 # Refer to [Yue et al. 2018] for details.
 @ti.func
-def ProjectDruckerPrager(S: ti.template(), Sp: ti.template()):
+def ProjectDruckerPrager(S: ti.template(), logSp: ti.template()):
   JSe = S[0, 0] * S[1, 1]
   for d in ti.static(range(2)):
-    S[d, d] = max(1e-6, abs(S[d, d] * Sp))
+    # apply volume recovery, we multiply the recorded volume with a less-than-one
+    # rate for better stability.
+    S[d, d] = max(1e-6, abs(S[d, d] * ti.exp(logSp * volume_recovery_rate)))
 
   if S[0, 0] * S[1, 1] >= 1.0:  # Project to tip
     S[0, 0] = 1.0
     S[1, 1] = 1.0
 
     # Record the geometric mean of per-dimension expansions for later volume
-    # recovery during compression, refer to [Gao et al. 2018]
-    Sp *= ti.sqrt(max(1e-6, JSe))
+    # recovery during compression, refer to [Gao et al. 2018]. Also, we perform
+    # this operation in the log-space for better numerical stability. For the
+    # same reason, we set a limit on the recorded volume expansion.
+    logSp = min(volume_recording_limit, logSp + ti.log(max(1e-6, JSe)) * 0.5)
   else:  # Check if the stress is inside the feasible region
-    Sp = 1.0
+    logSp = 0.0
     Je = max(1e-6, S[0, 0] * S[1, 1])
     sqrS_0 = S[0, 0] * S[0, 0]
     sqrS_1 = S[1, 1] * S[1, 1]
@@ -321,7 +327,7 @@ def Substep():
     Fp = (ti.Matrix.identity(float, 2) + dt * Cp) @ Fp
     U, sig, V = ti.svd(Fp)
     # Plasticity flow
-    ProjectDruckerPrager(sig, Sp[p])
+    ProjectDruckerPrager(sig, logSp[p])
     # Reconstruct elastic deformation gradient after plasticity
     F[p] = U @ sig @ V.transpose()
     stress = NeoHookeanElasticity(U, sig)
@@ -399,7 +405,7 @@ def Substep():
       if param_flip_pos_adj_min < flip_pos_adj:
         logdJ = new_C.trace() * dt
         J = F[p].determinant()
-        if ti.log(max(1e-15, J)) + logdJ < -0.001:  # if not separating
+        if ti.log(max(1e-6, J)) + logdJ < -0.001:  # if not separating
           flip_pos_adj = param_flip_pos_adj_min
       # interpolate to get old nodal velocity
       old_v = ti.Vector.zero(float, 2)
@@ -428,7 +434,7 @@ def Reset():
     ]
     v[i] = [0, 0]
     F[i] = ti.Matrix([[1, 0], [0, 1]])
-    Sp[i] = 1
+    logSp[i] = 0.0
     C[i] = ti.Matrix.zero(float, 2, 2)
   gravity[None] = [0, -9.81]
   capsule_translation[None] = [init_capsule_center_x, init_capsule_center_y]
