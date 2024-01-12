@@ -1,7 +1,8 @@
 ASFLIP Demo
 ================
-![Screenshot](http://yunfei.work/asflip/figs/example.png)
-This is a Python implementation of the ASFLIP advection method (http://yunfei.work/asflip/). We would like to hear from you if you appreciate this work.
+![example](https://github.com/nepluno/pyasflip/assets/5384915/d0f3562d-79cb-4995-b980-0bdd8c9161f3)
+
+This is a Python implementation of the ASFLIP advection method in paper [Revisiting Integration in the Material Point Method: A Scheme for Easier Separation and Less Dissipation](https://nepluno.github.io/asflip/). We would like to hear from you if you appreciate this work.
 
 Dependencies
 --------------------
